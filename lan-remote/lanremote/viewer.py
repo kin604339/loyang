@@ -19,7 +19,6 @@ from . import video
 
 log = logging.getLogger("lanremote.viewer")
 
-QUALITY_PRESETS = {"1": 35, "2": 60, "3": 80, "4": 92}
 
 
 class Net(threading.Thread):
@@ -200,15 +199,7 @@ def _message(title: str, text: str):
         print(f"{title}: {text}")
 
 
-HELP = [
-    "Ctrl+Alt+Shift + ...",
-    "  F  全螢幕 / 視窗      Q  離開",
-    "  B  用瀏覽器開啟檔案/聊天   R  重新整理畫面",
-    "  M  切換螢幕           G  抓住鍵盤（Alt+Tab 送給對方）",
-    "  1~4 畫質 低/中/高/最高  S  平滑縮放切換",
-    "  C  抓對方剪貼簿        V  送我的剪貼簿過去",
-    "  H  顯示/隱藏這個說明",
-]
+QUALITY_LABELS = [(35, "低"), (60, "中"), (80, "高"), (92, "最高")]
 
 
 def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int:
@@ -237,15 +228,12 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
     screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Microsoft JhengHei,PingFang TC,Noto Sans CJK TC,Arial", 16)
-    surf = None
-    scaled = None
-    scaled_key = None
+    surf = scaled = scaled_key = None
     fw = fh = 0
     cursor = None
     fullscreen = False
     smooth = True
-    show_help = False
-    toast = ("", 0.0)
+    toast = ("滑鼠移到視窗最上方會出現工具列。所有鍵盤操作都會直接送給對方。", time.time() + 6)
     pressed: dict[int, tuple[str, str]] = {}
     pending_move = None
     shown_frames = 0
@@ -255,6 +243,32 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
     running = True
     t_start = time.time()
     test_posted = False
+    kb_grab = True
+    bar_visible_until = 0.0
+    BAR_H = 38
+    def _get_window():
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return pygame.Window.from_display_module()
+        except Exception:
+            return None
+
+    set_kb_grab = hasattr(getattr(pygame, "Window", None), "grab_keyboard")
+
+    def apply_grab():
+        """Keyboard grab = system shortcuts (Alt+Tab, Win key) go to the remote side while we have focus."""
+        want = bool(kb_grab and pygame.key.get_focused())
+        try:
+            w = _get_window() if set_kb_grab else None
+            if w is not None:
+                w.grab_keyboard = want
+            elif fullscreen:
+                pygame.event.set_grab(want)
+        except Exception:
+            pass
 
     def rect_fit():
         sw, sh = screen.get_size()
@@ -268,9 +282,9 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
         r = rect_fit()
         return {"x": max(0.0, min(1.0, (pos[0] - r.x) / r.w)), "y": max(0.0, min(1.0, (pos[1] - r.y) / r.h))}
 
-    def say(text):
+    def say(text, secs=3):
         nonlocal toast
-        toast = (text, time.time() + 3)
+        toast = (text, time.time() + secs)
 
     def map_key(ev):
         k = ev.key
@@ -290,82 +304,116 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
             return None
         return key, code
 
-    def hotkey(ev) -> bool:
-        mods = pygame.key.get_mods()
-        if not (mods & pygame.KMOD_CTRL and mods & pygame.KMOD_ALT and mods & pygame.KMOD_SHIFT):
-            return False
-        nonlocal fullscreen, screen, running, smooth, show_help, scaled_key
-        k = ev.key
-        name_ = pygame.key.name(k)
-        if k == pygame.K_f:
-            fullscreen = not fullscreen
-            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN) if fullscreen else pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
-            pygame.event.set_grab(fullscreen)
-            scaled_key = None
-        elif k == pygame.K_q:
-            running = False
-        elif k == pygame.K_b:
-            webbrowser.open(f"{url}/?token={net.token}")
-        elif k == pygame.K_r:
-            net.send({"t": "refresh"})
-        elif k == pygame.K_m:
-            if len(monitors) > 1:
-                i = monitors.index(settings["monitor"]) if settings["monitor"] in monitors else 0
-                settings["monitor"] = monitors[(i + 1) % len(monitors)]
-                net.send_settings()
-                say(f"螢幕 {settings['monitor']}")
-        elif k == pygame.K_g:
-            g = not pygame.event.get_grab()
-            pygame.event.set_grab(g)
-            say("已抓住鍵盤滑鼠" if g else "已釋放鍵盤滑鼠")
-        elif name_ in QUALITY_PRESETS:
-            settings["quality"] = QUALITY_PRESETS[name_]
-            net.send_settings()
-            say(f"畫質 {settings['quality']}")
-        elif k == pygame.K_s:
-            smooth = not smooth
-            scaled_key = None
-        elif k == pygame.K_c:
-            net.send({"t": "clip_get"})
-        elif k == pygame.K_v:
-            try:
-                import pyperclip
+    # ---- toolbar actions ------------------------------------------------
+    def act_fullscreen():
+        nonlocal fullscreen, screen, scaled_key
+        fullscreen = not fullscreen
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN) if fullscreen else pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+        scaled_key = None
+        apply_grab()
 
-                net.send({"t": "clip_set", "text": pyperclip.paste()})
-            except Exception as e:
-                say(f"讀取剪貼簿失敗: {e}")
-        elif k == pygame.K_h:
-            show_help = not show_help
+    def act_monitor():
+        if len(monitors) > 1:
+            i = monitors.index(settings["monitor"]) if settings["monitor"] in monitors else 0
+            settings["monitor"] = monitors[(i + 1) % len(monitors)]
+            net.send_settings()
         else:
-            return False
-        # make sure the modifiers never stay pressed on the remote side
-        net.send({"t": "release_all"})
-        pressed.clear()
-        return True
+            say("對方只有一個螢幕")
+
+    def act_quality():
+        qs = [q for q, _ in QUALITY_LABELS]
+        i = qs.index(settings["quality"]) if settings["quality"] in qs else 1
+        settings["quality"] = qs[(i + 1) % len(qs)]
+        net.send_settings()
+
+    def act_clip_pull():
+        net.send({"t": "clip_get"})
+
+    def act_clip_push():
+        try:
+            import pyperclip
+
+            net.send({"t": "clip_set", "text": pyperclip.paste()})
+        except Exception as e:
+            say(f"讀取剪貼簿失敗: {e}")
+
+    def act_browser():
+        webbrowser.open(f"{url}/?token={net.token}")
+
+    def act_refresh():
+        net.send({"t": "refresh"})
+
+    def act_grab():
+        nonlocal kb_grab
+        kb_grab = not kb_grab
+        apply_grab()
+        say("鍵盤直通：開（Alt+Tab、Win 鍵會送給對方）" if kb_grab else "鍵盤直通：關（系統快捷鍵留在本機）")
+
+    def act_quit():
+        nonlocal running
+        running = False
+
+    def quality_label():
+        return next((lab for q, lab in QUALITY_LABELS if q == settings["quality"]), str(settings["quality"]))
+
+    def toolbar_items():
+        return [
+            ("離開全螢幕" if fullscreen else "全螢幕", act_fullscreen),
+            (f"螢幕 {settings['monitor']}/{len(monitors)}", act_monitor),
+            (f"畫質 {quality_label()}", act_quality),
+            ("抓對方剪貼簿", act_clip_pull),
+            ("送出我的剪貼簿", act_clip_push),
+            ("檔案 / 聊天", act_browser),
+            ("重新整理", act_refresh),
+            ("鍵盤直通 " + ("開" if kb_grab else "關"), act_grab),
+            ("離開", act_quit),
+        ]
+
+    def toolbar_rects():
+        x = 8
+        out = []
+        for label, fn in toolbar_items():
+            w = font.size(label)[0] + 18
+            out.append((pygame.Rect(x, 6, w, BAR_H - 12), label, fn))
+            x += w + 6
+        return out
+
+    def bar_showing():
+        return time.time() < bar_visible_until
 
     BTN = {1: "left", 2: "middle", 3: "right", 6: "back", 7: "forward"}
+    apply_grab()
     while running:
         if net.error:
             break
+        mx, my = pygame.mouse.get_pos()
+        if pygame.mouse.get_focused() and (my <= 2 or (bar_showing() and my < BAR_H)):
+            bar_visible_until = time.time() + 1.2
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
             elif ev.type == pygame.MOUSEMOTION:
-                pending_move = norm(ev.pos)
+                if not (bar_showing() and ev.pos[1] < BAR_H):
+                    pending_move = norm(ev.pos)
             elif ev.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+                if bar_showing() and ev.pos[1] < BAR_H:
+                    if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                        for r, label, fn in toolbar_rects():
+                            if r.collidepoint(ev.pos):
+                                fn()
+                                break
+                    continue
                 if ev.button in BTN:
                     if pending_move:
                         net.send({"t": "mm", **pending_move})
                         pending_move = None
                     net.send({"t": "md" if ev.type == pygame.MOUSEBUTTONDOWN else "mu", "b": BTN[ev.button], **norm(ev.pos)})
             elif ev.type == pygame.MOUSEWHEEL:
-                dx = int(getattr(ev, "precise_x", ev.x) * 1) or (1 if ev.x > 0 else -1 if ev.x < 0 else 0)
-                dy = int(getattr(ev, "precise_y", ev.y) * 1) or (1 if ev.y > 0 else -1 if ev.y < 0 else 0)
+                dx = int(getattr(ev, "precise_x", ev.x)) or (1 if ev.x > 0 else -1 if ev.x < 0 else 0)
+                dy = int(getattr(ev, "precise_y", ev.y)) or (1 if ev.y > 0 else -1 if ev.y < 0 else 0)
                 if dx or dy:
                     net.send({"t": "wh", "dx": dx, "dy": dy})
             elif ev.type == pygame.KEYDOWN:
-                if hotkey(ev):
-                    continue
                 mk = map_key(ev)
                 if mk:
                     pressed[ev.scancode] = mk
@@ -377,6 +425,9 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
             elif ev.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
                 net.send({"t": "release_all"})
                 pressed.clear()
+                apply_grab()
+            elif ev.type == getattr(pygame, "WINDOWFOCUSGAINED", -1):
+                apply_grab()
         if pending_move:
             net.send({"t": "mm", **pending_move})
             pending_move = None
@@ -391,7 +442,7 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
             elif t == "toast":
                 say(m.get("text", ""))
             elif t == "chat":
-                say(f"{m.get('from')}: {m.get('text')}")
+                say(f"{m.get('from')}: {m.get('text')}", 6)
             elif t == "cur" and m.get("x") is not None:
                 cursor = (m["x"], m["y"])
             elif t == "clip":
@@ -436,13 +487,17 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
         else:
             msg = net.error or ("連線中…" if not net.connected else "等待畫面…")
             screen.blit(font.render(msg, True, (220, 220, 220)), (20, 20))
-        inside = r.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_focused() and surf is not None
+        over_bar = bar_showing() and my < BAR_H
+        inside = r.collidepoint((mx, my)) and pygame.mouse.get_focused() and surf is not None and not over_bar
         pygame.mouse.set_visible(not inside)
-        if show_help:
-            y = 20
-            for line in HELP:
-                screen.blit(font.render(line, True, (255, 255, 255), (0, 0, 0)), (20, y))
-                y += 22
+        if bar_showing():
+            bar = pygame.Surface((screen.get_width(), BAR_H), pygame.SRCALPHA)
+            bar.fill((20, 22, 30, 235))
+            screen.blit(bar, (0, 0))
+            for br, label, fn in toolbar_rects():
+                hover = br.collidepoint((mx, my))
+                pygame.draw.rect(screen, (79, 140, 255) if hover else (45, 50, 64), br, border_radius=6)
+                screen.blit(font.render(label, True, (255, 255, 255)), (br.x + 9, br.y + 3))
         if toast[0] and time.time() < toast[1]:
             screen.blit(font.render(toast[0], True, (255, 255, 255), (40, 40, 60)), (20, screen.get_height() - 36))
         pygame.display.flip()
@@ -455,19 +510,22 @@ def main(url: str, pin: Optional[str] = None, name: Optional[str] = None) -> int
             net.bytes = 0
             last_stat = now
             pygame.display.set_caption(f"LAN Remote - {net.info.get('name', host)}  {fps_display} fps  {kb:.0f} KB/s  "
-                                       f"{net.latency} ms  {fw}x{fh}  {net.codec}   [Ctrl+Alt+Shift+H 說明]")
+                                       f"{net.latency} ms  {fw}x{fh}  {net.codec}")
         if test_seconds:
             if not test_posted and surf is not None:
                 test_posted = True
                 pygame.event.post(pygame.event.Event(pygame.MOUSEMOTION, pos=(r.centerx, r.centery), rel=(1, 1), buttons=(0, 0, 0)))
                 pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=(r.centerx, r.centery), button=1))
                 pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=(r.centerx, r.centery), button=1))
-                pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a, mod=0, unicode="a", scancode=4))
-                pygame.event.post(pygame.event.Event(pygame.KEYUP, key=pygame.K_a, mod=0, unicode="", scancode=4))
+                pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LALT, mod=0, unicode="", scancode=226))
+                pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB, mod=pygame.KMOD_LALT, unicode="\t", scancode=43))
+                pygame.event.post(pygame.event.Event(pygame.KEYUP, key=pygame.K_TAB, mod=pygame.KMOD_LALT, unicode="", scancode=43))
+                pygame.event.post(pygame.event.Event(pygame.KEYUP, key=pygame.K_LALT, mod=0, unicode="", scancode=226))
                 pygame.event.post(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-2, precise_x=0.0, precise_y=-2.0, flipped=False))
+                bar_visible_until = now + 5  # exercise the toolbar drawing path too
             if now - t_start > test_seconds:
                 print(json.dumps({"frames": net.frames, "codec": net.codec, "latency": net.latency, "error": net.error,
-                                  "size": [fw, fh], "fps": fps_display}))
+                                  "size": [fw, fh], "fps": fps_display, "kb_grab_api": bool(set_kb_grab)}))
                 running = False
         clock.tick(60)
 
