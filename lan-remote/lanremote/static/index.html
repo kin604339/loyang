@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>LAN Remote</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ===== 登入畫面 ===== -->
+<div id="login" class="screen">
+  <div class="card">
+    <h1>LAN Remote</h1>
+    <p class="sub">連線到 <b id="loginHost">…</b><span id="loginDemo" class="tag hidden">示範模式</span></p>
+    <label>你的名稱<input id="myName" placeholder="例如：客廳電腦 / 小明" maxlength="40"></label>
+    <label>PIN 碼<input id="pin" type="password" inputmode="numeric" placeholder="主機端視窗顯示的 PIN" autocomplete="off"></label>
+    <button id="btnLogin" class="primary">連線</button>
+    <p id="loginError" class="error"></p>
+    <details>
+      <summary>區網上的其他電腦</summary>
+      <ul id="loginPeers" class="peerlist"><li class="muted">搜尋中…</li></ul>
+    </details>
+  </div>
+</div>
+
+<!-- ===== 主畫面 ===== -->
+<div id="app" class="screen hidden">
+  <header class="bar">
+    <div class="left">
+      <span class="brand">LAN Remote</span>
+      <span id="hostName" class="host"></span>
+      <span id="stats" class="stats"></span>
+    </div>
+    <div class="center">
+      <select id="selMonitor" title="螢幕"></select>
+      <select id="selQuality" title="畫質">
+        <option value="35">畫質 低</option>
+        <option value="60" selected>畫質 中</option>
+        <option value="80">畫質 高</option>
+        <option value="92">畫質 最高</option>
+      </select>
+      <select id="selFps" title="每秒張數">
+        <option value="5">5 fps</option>
+        <option value="10">10 fps</option>
+        <option value="15" selected>15 fps</option>
+        <option value="24">24 fps</option>
+        <option value="30">30 fps</option>
+      </select>
+      <select id="selScale" title="解析度">
+        <option value="1">100%</option>
+        <option value="0.75">75%</option>
+        <option value="0.5">50%</option>
+      </select>
+    </div>
+    <div class="right">
+      <button class="ib" data-panel="text" title="輸入文字（支援中文）">⌨ 文字</button>
+      <div class="dd">
+        <button class="ib" id="btnKeys" title="特殊按鍵">⎇ 按鍵 ▾</button>
+        <div class="menu" id="keysMenu">
+          <button data-combo="alt,tab">Alt + Tab</button>
+          <button data-combo="cmd,tab">Cmd + Tab (Mac)</button>
+          <button data-combo="ctrl,shift,esc">Ctrl + Shift + Esc（工作管理員）</button>
+          <button data-combo="cmd">Win / Cmd 鍵</button>
+          <button data-combo="cmd,d">Win + D（顯示桌面）</button>
+          <button data-combo="cmd,l">Win + L（鎖定 Windows）</button>
+          <button data-combo="ctrl,cmd,q">Ctrl + Cmd + Q（鎖定 Mac）</button>
+          <button data-combo="alt,f4">Alt + F4</button>
+          <button data-combo="cmd,q">Cmd + Q</button>
+          <button data-combo="printscreen">PrintScreen</button>
+          <button data-combo="esc">Esc</button>
+          <button data-combo="ctrl,alt,delete">Ctrl + Alt + Del（Linux/Mac 才有效）</button>
+          <button data-action="release">放開所有按鍵</button>
+        </div>
+      </div>
+      <div class="dd">
+        <button class="ib" id="btnClip" title="剪貼簿">📋 剪貼簿 ▾</button>
+        <div class="menu" id="clipMenu">
+          <button data-clip="pull">把對方的剪貼簿抓過來</button>
+          <button data-clip="push">把我的剪貼簿送過去</button>
+        </div>
+      </div>
+      <button class="ib" data-panel="files" title="檔案傳輸">📁 檔案</button>
+      <button class="ib" data-panel="chat" title="聊天">💬 <span id="chatBadge" class="badge hidden">0</span></button>
+      <button class="ib" data-panel="system" title="系統">🖥 系統</button>
+      <button class="ib" data-panel="devices" title="區網裝置">📡</button>
+      <button class="ib" data-panel="settings" title="設定">⚙</button>
+      <button class="ib" id="btnFull" title="全螢幕">⛶</button>
+      <button class="ib" id="btnLogout" title="中斷連線">✕</button>
+    </div>
+  </header>
+
+  <main id="stage" tabindex="0">
+    <div id="canvasWrap">
+      <canvas id="screen" width="16" height="9"></canvas>
+      <div id="cursor"></div>
+    </div>
+    <div id="dropHint" class="hidden">放開以上傳檔案到對方的「接收資料夾」</div>
+    <div id="overlayMsg" class="hidden"></div>
+  </main>
+
+  <aside id="panel" class="hidden">
+    <div class="panelHead"><span id="panelTitle"></span><button id="btnClosePanel" class="ib">✕</button></div>
+
+    <section data-tab="text" class="tab">
+      <p class="muted">直接在畫面上打字也可以；中文 / 長文字請用這裡（會用對方系統輸入 Unicode，不需切換輸入法）。</p>
+      <textarea id="typeText" rows="6" placeholder="輸入要送到對方電腦的文字…"></textarea>
+      <div class="row">
+        <button id="btnType" class="primary">送出</button>
+        <button id="btnTypeEnter">送出並按 Enter</button>
+      </div>
+    </section>
+
+    <section data-tab="files" class="tab">
+      <div class="row wrap" id="fsShortcuts"></div>
+      <div class="row">
+        <button id="fsUp" class="ib" title="上一層">⬆</button>
+        <input id="fsPath" placeholder="路徑">
+        <button id="fsGo" class="ib">前往</button>
+      </div>
+      <div class="row">
+        <label class="filebtn primary">⬆ 上傳到這裡<input id="fsUpload" type="file" multiple></label>
+        <button id="fsMkdir">新資料夾</button>
+        <button id="fsRefresh">重新整理</button>
+      </div>
+      <div id="fsProgress" class="progress hidden"><div></div><span></span></div>
+      <ul id="fsList" class="fslist"></ul>
+    </section>
+
+    <section data-tab="chat" class="tab">
+      <div id="chatLog" class="chatlog"></div>
+      <div class="row">
+        <input id="chatInput" placeholder="輸入訊息，Enter 送出">
+        <button id="chatSend" class="primary">送出</button>
+      </div>
+    </section>
+
+    <section data-tab="system" class="tab">
+      <h3>系統資訊</h3>
+      <table id="sysTable" class="kv"></table>
+      <h3>電源</h3>
+      <div class="row wrap">
+        <button data-power="lock">🔒 鎖定</button>
+        <button data-power="sleep">💤 睡眠</button>
+        <button data-power="logout">登出</button>
+        <button data-power="restart" class="danger">重新開機</button>
+        <button data-power="shutdown" class="danger">關機</button>
+      </div>
+      <h3>畫面</h3>
+      <div class="row wrap">
+        <button id="btnShot">📷 儲存截圖</button>
+        <button id="btnRefresh">🔄 重新整理畫面</button>
+        <button id="btnPause">⏸ 暫停串流</button>
+      </div>
+      <h3>遠端指令 <span id="shellState" class="muted"></span></h3>
+      <div class="row"><input id="shellCmd" placeholder="例如：ipconfig / ls -la"><button id="shellRun">執行</button></div>
+      <pre id="shellOut" class="out"></pre>
+      <h3>連線紀錄</h3>
+      <pre id="auditOut" class="out"></pre>
+    </section>
+
+    <section data-tab="devices" class="tab">
+      <p class="muted">同一個 WiFi / 區網內，有安裝並執行 LAN Remote 的電腦會自動出現在這裡。</p>
+      <ul id="peerList" class="peerlist"></ul>
+      <h3>Wake-on-LAN 喚醒</h3>
+      <div class="row"><input id="wolMac" placeholder="MAC 位址 例如 a1:b2:c3:d4:e5:f6"><button id="wolSend">喚醒</button></div>
+    </section>
+
+    <section data-tab="settings" class="tab">
+      <label class="chk"><input type="checkbox" id="optInvertScroll"> 反轉滾輪方向</label>
+      <label class="chk"><input type="checkbox" id="optShowCursor" checked> 顯示對方的滑鼠游標</label>
+      <label class="chk"><input type="checkbox" id="optFit" checked> 畫面縮放到視窗大小</label>
+      <label class="chk"><input type="checkbox" id="optViewOnly"> 我只看不操作（本機設定）</label>
+      <h3>連線資訊</h3>
+      <table id="connTable" class="kv"></table>
+      <p class="muted">提示：按「全螢幕」後，Alt+Tab、Win 鍵等會直接送到對方電腦（Chrome / Edge）。瀏覽器保留的快捷鍵（Ctrl+W、Cmd+Q…）請改用「按鍵」選單。</p>
+    </section>
+  </aside>
+
+  <div id="toasts"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
