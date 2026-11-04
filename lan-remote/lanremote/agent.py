@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import secrets
+import subprocess
 import sys
 import threading
 
@@ -26,6 +27,8 @@ DEFAULTS = {
     "allow_shell": False,
     "receive_dir": "",
     "fs_root": "",
+    "https": False,
+    "encoder": "",
 }
 
 
@@ -64,6 +67,9 @@ def parse_args(argv=None):
     p.add_argument("--receive-dir", help="接收檔案的資料夾")
     p.add_argument("--fs-root", help="限制檔案管理只能存取此資料夾")
     p.add_argument("--reset-pin", action="store_true", help="重新產生 PIN 碼")
+    p.add_argument("--https", action="store_true", help="用 HTTPS（自簽憑證；瀏覽器才能用 H.264 硬體解碼）")
+    p.add_argument("--encoder", help="指定 H.264 編碼器，例如 libx264 / h264_videotoolbox / h264_nvenc")
+    p.add_argument("--connect", metavar="URL", help="直接開啟原生連線視窗連到對方，例如 --connect 192.168.1.23")
     p.add_argument("--version", action="version", version=f"lanremote {__version__}")
     return p.parse_args(argv)
 
@@ -88,6 +94,10 @@ def build_settings(args) -> dict:
         cfg["receive_dir"] = args.receive_dir
     if args.fs_root:
         cfg["fs_root"] = args.fs_root
+    if args.https:
+        cfg["https"] = True
+    if args.encoder:
+        cfg["encoder"] = args.encoder
     if not cfg.get("id"):
         cfg["id"] = secrets.token_hex(4)
     save_config(cfg)
@@ -102,7 +112,7 @@ def banner(server: RemoteServer):
     print(f"  LAN Remote v{__version__}   名稱: {server.name}")
     print(f"  PIN 碼: {server.settings['pin']}")
     for ip in ips:
-        print(f"  在別台電腦的瀏覽器開啟:  http://{ip}:{server.port}/")
+        print(f"  在別台電腦開啟:  {server.scheme}://{ip}:{server.port}/")
     if server.demo:
         print("  (示範模式：畫面為模擬，滑鼠鍵盤不會真的被控制)")
     print("  設定檔:", CONFIG_PATH)
@@ -168,8 +178,27 @@ def run_with_gui(server: RemoteServer):
         t.join(5)
 
 
+def launch_viewer(url: str, pin: str = "", name: str = "") -> subprocess.Popen:
+    """Open the native viewer window in a separate process (works both from source and from the packaged exe)."""
+    env = dict(os.environ)
+    if pin:
+        env["LANREMOTE_PIN"] = pin
+    if name:
+        env["LANREMOTE_VIEWER_NAME"] = name
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--connect", url]
+    else:
+        cmd = [sys.executable, "-m", "lanremote", "--connect", url]
+    return subprocess.Popen(cmd, env=env)
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.connect:
+        logging.basicConfig(level=logging.INFO)
+        from . import viewer
+
+        sys.exit(viewer.main(args.connect, args.pin or os.environ.get("LANREMOTE_PIN"), args.name))
     if sys.stdout is None or sys.stderr is None:  # pythonw / packaged .exe without console
         os.makedirs(CONFIG_DIR, exist_ok=True)
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -177,6 +206,10 @@ def main(argv=None):
     else:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = build_settings(args)
+    if settings.get("encoder"):
+        from . import video
+
+        video.set_preferred(settings["encoder"])
     server = RemoteServer(settings, demo=args.demo)
     if args.no_gui or os.environ.get("LANREMOTE_NO_GUI"):
         run_headless(server)

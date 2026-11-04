@@ -8,7 +8,7 @@ import webbrowser
 from tkinter import messagebox, ttk
 
 from . import __version__
-from .agent import new_pin, save_config
+from .agent import launch_viewer, new_pin, save_config
 from .netutil import local_ips
 
 
@@ -133,6 +133,14 @@ def run(server, loop: asyncio.AbstractEventLoop):
     ttk.Checkbutton(opts, text="每次連線都要我按「允許」", variable=accept_var, command=opt_changed).pack(anchor="w", padx=8)
     ttk.Checkbutton(opts, text="唯讀模式（對方只能看，不能操作）", variable=view_var, command=opt_changed).pack(anchor="w", padx=8)
     ttk.Checkbutton(opts, text="允許遠端執行指令（進階）", variable=shell_var, command=opt_changed).pack(anchor="w", padx=8)
+    https_var = tk.BooleanVar(value=bool(server.settings.get("https")))
+
+    def https_changed():
+        server.settings["https"] = https_var.get()
+        save_config(server.settings)
+        messagebox.showinfo("HTTPS", "設定已儲存，重新啟動 LAN Remote 後生效。\n瀏覽器第一次會警告憑證不受信任，選「繼續前往」即可。", parent=root)
+
+    ttk.Checkbutton(opts, text="用 HTTPS（瀏覽器端才能用 H.264 流暢模式，需重啟）", variable=https_var, command=https_changed).pack(anchor="w", padx=8)
     if server.demo:
         ttk.Label(opts, text="⚠ 示範模式：畫面為模擬、不會真的控制這台電腦", foreground="#b00").pack(anchor="w", padx=8, pady=2)
 
@@ -152,13 +160,34 @@ def run(server, loop: asyncio.AbstractEventLoop):
     peers_lb.pack(fill="both", expand=True, padx=4, pady=2)
     peer_urls: list[str] = []
 
-    def open_peer(_=None):
+    from tkinter import simpledialog
+
+    def connect_native(url: str):
+        pin = simpledialog.askstring("連線", f"連線到 {url}\n請輸入對方視窗顯示的 PIN 碼：", parent=root, show="*")
+        if pin:
+            launch_viewer(url, pin, server.name)
+
+    def selected_peer_url():
         sel = peers_lb.curselection()
         if sel and sel[0] < len(peer_urls):
-            webbrowser.open(peer_urls[sel[0]])
+            return peer_urls[sel[0]]
+        return None
+
+    def open_peer(_=None):
+        u = selected_peer_url()
+        if u:
+            connect_native(u)
+
+    def open_peer_browser():
+        u = selected_peer_url()
+        if u:
+            webbrowser.open(u)
 
     peers_lb.bind("<Double-Button-1>", open_peer)
-    ttk.Button(pf, text="連線選取的電腦", command=open_peer).pack(pady=(0, 4))
+    pbtns = ttk.Frame(pf)
+    pbtns.pack(pady=(0, 4))
+    ttk.Button(pbtns, text="連線（原生視窗）", command=open_peer).pack(side="left")
+    ttk.Button(pbtns, text="用瀏覽器", command=open_peer_browser, width=8).pack(side="left", padx=4)
     ttk.Label(pf, text="或輸入對方 IP / 網址:", foreground="#555").pack(anchor="w", padx=4)
     manual_row = ttk.Frame(pf)
     manual_row.pack(fill="x", padx=4, pady=(0, 4))
@@ -174,7 +203,7 @@ def run(server, loop: asyncio.AbstractEventLoop):
             target = "http://" + target
         if target.count(":") < 2:  # no port given
             target = target.rstrip("/") + f":{server.port}"
-        webbrowser.open(target.rstrip("/") + "/")
+        connect_native(target.rstrip("/"))
 
     manual_entry.bind("<Return>", open_manual)
     ttk.Button(manual_row, text="連線", command=open_manual, width=5).pack(side="left", padx=(4, 0))
@@ -201,7 +230,7 @@ def run(server, loop: asyncio.AbstractEventLoop):
 
     bottom = ttk.Frame(root)
     bottom.pack(fill="x", padx=10, pady=(0, 8))
-    ttk.Button(bottom, text="在本機瀏覽器開啟", command=lambda: webbrowser.open(f"http://127.0.0.1:{server.port}/")).pack(side="left")
+    ttk.Button(bottom, text="在本機瀏覽器開啟", command=lambda: webbrowser.open(f"{server.scheme}://127.0.0.1:{server.port}/")).pack(side="left")
     status_var = tk.StringVar(value="")
     ttk.Label(bottom, textvariable=status_var).pack(side="right")
 
@@ -212,7 +241,7 @@ def run(server, loop: asyncio.AbstractEventLoop):
         ips = local_ips()
         url_text.config(state="normal")
         url_text.delete("1.0", "end")
-        url_text.insert("1.0", "\n".join(f"http://{ip}:{server.port}/" for ip in ips) or "(找不到網路介面)")
+        url_text.insert("1.0", "\n".join(f"{server.scheme}://{ip}:{server.port}/" for ip in ips) or "(找不到網路介面)")
         url_text.config(state="disabled")
         viewers_lb.delete(0, "end")
         for v in server.viewer_list():
@@ -222,7 +251,7 @@ def run(server, loop: asyncio.AbstractEventLoop):
         peer_urls.clear()
         for p in server.discovery.list():
             peers_lb.insert("end", f"{p.get('name')}  {p.get('ip')}  ({p.get('os')})")
-            peer_urls.append(f"http://{p['ip']}:{p.get('port', 7788)}/")
+            peer_urls.append(f"{'https' if p.get('https') else 'http'}://{p['ip']}:{p.get('port', 7788)}")
         if len(events) > shown_events or shown_events > len(events):
             log_text.config(state="normal")
             if shown_events > len(events):

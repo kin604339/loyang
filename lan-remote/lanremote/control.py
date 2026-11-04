@@ -48,6 +48,11 @@ for _i in range(1, 21):
     _COMBO_ALIASES[f"f{_i}"] = f"f{_i}"
 
 _CODE_CHAR = re.compile(r"^(Key([A-Z])|Digit([0-9]))$")
+_CODE_PUNCT = {
+    "Minus": "-", "Equal": "=", "BracketLeft": "[", "BracketRight": "]", "Backslash": "\\", "Semicolon": ";",
+    "Quote": "'", "Comma": ",", "Period": ".", "Slash": "/", "Backquote": "`", "Space": " ",
+    "NumpadAdd": "+", "NumpadSubtract": "-", "NumpadMultiply": "*", "NumpadDivide": "/", "NumpadDecimal": ".",
+}
 
 
 class PynputBackend(ControlBackend):
@@ -110,7 +115,9 @@ class PynputBackend(ControlBackend):
         if modifiers_held and m:
             # with Ctrl/Alt/Cmd held the browser's `key` may be garbage (e.g. Alt+a -> å on mac)
             return self._KeyCode.from_char((m.group(2) or m.group(3)).lower())
-        if key and len(key) == 1:
+        if (modifiers_held or not key or ord(key[0]) < 32) and code in _CODE_PUNCT:
+            return self._KeyCode.from_char(_CODE_PUNCT[code])
+        if key and len(key) == 1 and ord(key) >= 32:
             return self._KeyCode.from_char(key)
         if code and code.startswith("Numpad") and len(code) == 7 and code[-1].isdigit():
             return self._KeyCode.from_char(code[-1])

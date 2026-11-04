@@ -18,6 +18,8 @@ cmd = [
     "--hidden-import", "pynput.keyboard._win32", "--hidden-import", "pynput.mouse._win32",
     "--hidden-import", "pynput.keyboard._darwin", "--hidden-import", "pynput.mouse._darwin",
     "--hidden-import", "pynput.keyboard._xorg", "--hidden-import", "pynput.mouse._xorg",
+    "--collect-all", "av", "--collect-submodules", "pygame", "--collect-data", "pygame",
+    "--hidden-import", "cryptography", "--hidden-import", "numpy",
     os.path.join(here, "run.py"),
 ]
 print(" ".join(cmd))

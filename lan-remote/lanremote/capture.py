@@ -21,6 +21,13 @@ class CaptureBackend:
     def grab(self, index: int) -> Image.Image:
         raise NotImplementedError
 
+    def grab_raw(self, index: int):
+        """Returns (ndarray, pixel_format) for video encoding. Default: via PIL image."""
+        import numpy as np
+
+        img = self.grab(index)
+        return np.asarray(img), "rgb24"
+
     def monitor_rect(self, index: int) -> dict:
         mons = self.monitors()
         for m in mons:
@@ -68,6 +75,17 @@ class MSSBackend(CaptureBackend):
             index = 1 if len(mons) > 1 else 0
         shot = sct.grab(mons[index])
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def grab_raw(self, index: int):
+        import numpy as np
+
+        sct = self._sct()
+        mons = sct.monitors
+        if index < 0 or index >= len(mons):
+            index = 1 if len(mons) > 1 else 0
+        shot = sct.grab(mons[index])
+        arr = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
+        return arr, "bgra"
 
 
 class DemoBackend(CaptureBackend):

@@ -8,6 +8,7 @@ import os
 import platform
 import secrets
 import shutil
+import ssl
 import string
 import struct
 import sys
@@ -20,7 +21,7 @@ from typing import Awaitable, Callable, Optional
 
 from aiohttp import web
 
-from . import __version__, capture, control, netutil, sysactions
+from . import __version__, capture, control, netutil, sysactions, video
 
 log = logging.getLogger("lanremote")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -40,7 +41,10 @@ class Viewer:
     scale: float = 1.0
     paused: bool = False
     force_full: bool = True
+    codec: str = "jpeg"
     encoder: capture.FrameEncoder = field(default_factory=capture.FrameEncoder)
+    h264: Optional["video.H264Encoder"] = None
+    prev_raw: Optional[object] = None
     bytes_sent: int = 0
     frames_sent: int = 0
     last_input: float = 0.0
@@ -67,6 +71,15 @@ class RemoteServer:
         self.app = self._build_app()
         self.runner: Optional[web.AppRunner] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.encoder_name = ""
+
+    @property
+    def https(self) -> bool:
+        return bool(self.settings.get("https"))
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.https else "http"
 
     # ------------------------------------------------------------------ info
     @property
@@ -79,7 +92,7 @@ class RemoteServer:
 
     def announce_info(self) -> dict:
         return {"id": self.device_id, "name": self.name, "port": self.port, "os": platform.system(),
-                "mac": netutil.mac_address(), "v": __version__}
+                "mac": netutil.mac_address(), "v": __version__, "https": self.https}
 
     def _audit(self, kind: str, **data):
         entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, **data}
@@ -142,8 +155,8 @@ class RemoteServer:
     async def api_info(self, request):
         return web.json_response({
             "name": self.name, "os": platform.system(), "version": __version__, "demo": self.demo,
-            "ips": netutil.local_ips(), "port": self.port, "id": self.device_id,
-            "view_only": bool(self.settings.get("view_only")),
+            "ips": netutil.local_ips(), "port": self.port, "id": self.device_id, "https": self.https,
+            "h264": video.AVAILABLE, "view_only": bool(self.settings.get("view_only")),
             "require_accept": bool(self.settings.get("require_accept")),
         })
 
@@ -225,6 +238,8 @@ class RemoteServer:
         finally:
             stream.cancel()
             self.viewers.discard(v)
+            if v.h264:
+                v.h264.close()
             self.control.release_all()
             self._audit("viewer_disconnected", ip=v.ip, name=v.name)
         return ws
@@ -234,7 +249,7 @@ class RemoteServer:
             "t": "info", "name": self.name, "os": platform.system(), "version": __version__, "demo": self.demo,
             "monitors": self.capture.monitors(), "view_only": bool(self.settings.get("view_only")),
             "allow_shell": bool(self.settings.get("allow_shell")), "capture": self.capture.name,
-            "control": self.control.name,
+            "control": self.control.name, "h264": video.AVAILABLE, "encoder": self.encoder_name,
         })
 
     def _frame_to_screen(self, v: Viewer, nx: float, ny: float) -> tuple[float, float]:
@@ -249,17 +264,18 @@ class RemoteServer:
         if t == "settings":
             if "monitor" in m:
                 v.monitor = int(m["monitor"])
-                v.force_full = True
             if "quality" in m:
                 v.quality = max(10, min(95, int(m["quality"])))
             if "fps" in m:
                 v.fps = max(1, min(60, int(m["fps"])))
             if "scale" in m:
                 v.scale = max(0.25, min(1.0, float(m["scale"])))
-                v.force_full = True
             if "paused" in m:
                 v.paused = bool(m["paused"])
-                v.force_full = True
+            if "codec" in m:
+                v.codec = "h264" if (m["codec"] == "h264" and video.AVAILABLE) else "jpeg"
+            v.force_full = True  # any change -> new keyframe / new encoder
+            await v.ws.send_json({"t": "codec", "codec": v.codec})
             return
         if t == "refresh":
             v.force_full = True
@@ -315,6 +331,47 @@ class RemoteServer:
             except Exception:
                 pass
 
+    def _produce(self, v: Viewer):
+        """Runs in a worker thread: grab the screen and encode one frame. Returns (header, bytes) or None."""
+        if v.codec == "h264" and video.AVAILABLE:
+            arr, fmt = self.capture.grab_raw(v.monitor)
+            h, w = arr.shape[:2]
+            scale = _effective_scale(w, v.scale)
+            enc = v.h264
+            need_new = (enc is None or v.force_full or enc.src_w != w or enc.src_h != h or enc.src_format != fmt
+                        or enc.fps != v.fps or enc.quality != v.quality
+                        or enc.width != max(2, int(w * scale)) // 2 * 2)
+            if not need_new and v.prev_raw is not None and v.prev_raw.shape == arr.shape:
+                import numpy as np
+
+                if np.array_equal(v.prev_raw, arr):
+                    return None  # nothing changed -> send nothing
+            v.prev_raw = arr.copy() if not arr.flags.owndata else arr
+            if need_new:
+                if enc:
+                    enc.close()
+                try:
+                    enc = video.H264Encoder(w, h, v.fps, v.quality, fmt, int(w * scale), int(h * scale))
+                except Exception as e:
+                    log.warning("H.264 unavailable (%s), falling back to JPEG", e)
+                    v.codec = "jpeg"
+                    v.h264 = None
+                    v.force_full = True
+                    return self._produce(v)
+                v.h264 = enc
+                self.encoder_name = enc.name
+                v.force_full = False
+            packets = enc.encode(arr, force_key=need_new)
+            if not packets:
+                return None
+            data = b"".join(p for p, _ in packets)
+            key = any(k for _, k in packets)
+            return {"t": "h264", "key": key, "fw": enc.width, "fh": enc.height, "enc": enc.name}, data
+        img = self.capture.grab(v.monitor)
+        force = v.force_full
+        v.force_full = False
+        return v.encoder.encode(img, v.quality, _effective_scale(img.width, v.scale), force)
+
     async def _stream_loop(self, v: Viewer):
         loop = asyncio.get_running_loop()
         last_cursor = None
@@ -324,12 +381,9 @@ class RemoteServer:
                 continue
             t0 = loop.time()
             try:
-                img = await loop.run_in_executor(self.executor, self.capture.grab, v.monitor)
-                force = v.force_full
-                v.force_full = False
-                res = await loop.run_in_executor(self.executor, v.encoder.encode, img, v.quality, v.scale, force)
+                res = await loop.run_in_executor(self.executor, self._produce, v)
             except Exception as e:
-                log.warning("capture error: %s", e)
+                log.warning("capture/encode error: %s", e)
                 await asyncio.sleep(0.5)
                 continue
             cur = self.control.cursor_position()
@@ -551,7 +605,14 @@ class RemoteServer:
         self.loop = asyncio.get_running_loop()
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "0.0.0.0", self.port, reuse_address=True)
+        ssl_ctx = None
+        if self.https:
+            from .tls import ensure_certificate
+
+            cert, key = ensure_certificate()
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(cert, key)
+        site = web.TCPSite(self.runner, "0.0.0.0", self.port, reuse_address=True, ssl_context=ssl_ctx)
         await site.start()
         self.discovery.start()
         log.info("listening on port %s", self.port)
@@ -589,6 +650,16 @@ class RemoteServer:
         entry = {"t": "chat", "from": f"{self.name} (主機)", "text": text, "time": time.strftime("%H:%M")}
         self.chat_log.append(entry)
         asyncio.run_coroutine_threadsafe(self.broadcast(entry), self.loop)
+
+
+MAX_STREAM_WIDTH = 2560
+
+
+def _effective_scale(width: int, scale: float) -> float:
+    """"100%" means "native, but never wider than 2560px" so 4K / Retina screens stay smooth."""
+    if width * scale > MAX_STREAM_WIDTH:
+        return MAX_STREAM_WIDTH / width
+    return scale
 
 
 def _unique_path(p: str) -> str:

@@ -4,3 +4,7 @@ mss>=9.0
 pynput>=1.7
 pyperclip>=1.8
 psutil>=5.9
+numpy>=1.26
+av>=12.0
+pygame-ce>=2.4
+cryptography>=42

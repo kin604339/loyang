@@ -8,9 +8,12 @@
     opts: JSON.parse(localStorage.getItem("lr_opts") || "{}"),
   };
   const canvas = $("#screen"), ctx = canvas.getContext("2d"), stage = $("#stage"), cursorEl = $("#cursor");
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  if (TOKEN) history.replaceState(null, "", location.pathname);
 
   // ---------------------------------------------------------------- helpers
   const api = async (path, opts = {}) => {
+    if (TOKEN) opts.headers = { ...(opts.headers || {}), "X-Token": TOKEN };
     const r = await fetch(path, { credentials: "same-origin", ...opts });
     if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
     const data = await r.json().catch(() => ({}));
@@ -37,7 +40,7 @@
     if (!peers.length) { ul.innerHTML = '<li class="muted">目前沒有找到其他電腦（對方需要執行 LAN Remote，且在同一個網路）</li>'; return; }
     for (const p of peers) {
       const li = document.createElement("li");
-      const url = `http://${p.ip}:${p.port || 7788}/`;
+      const url = `${p.https ? "https" : "http"}://${p.ip}:${p.port || 7788}/`;
       li.innerHTML = `<div><div class="n"></div><div class="d"></div></div><div class="row"></div>`;
       li.querySelector(".n").textContent = p.name;
       li.querySelector(".d").textContent = `${p.ip} · ${p.os || ""}${p.mac ? " · " + p.mac : ""}`;
@@ -91,7 +94,7 @@
   }
   function connectWs() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws${TOKEN ? "?token=" + TOKEN : ""}`);
     ws.binaryType = "arraybuffer";
     state.ws = ws;
     $("#overlayMsg").textContent = "連線中…"; $("#overlayMsg").classList.remove("hidden");
@@ -106,8 +109,34 @@
       }, 3000);
     };
   }
+  const canH264 = () => !!(state.info && state.info.h264 && window.VideoDecoder && window.isSecureContext && !state.noH264);
   function sendSettings() {
-    send({ t: "settings", monitor: +$("#selMonitor").value || 1, quality: +$("#selQuality").value, fps: +$("#selFps").value, scale: +$("#selScale").value, paused: state.paused });
+    send({ t: "settings", monitor: +$("#selMonitor").value || 1, quality: +$("#selQuality").value, fps: +$("#selFps").value, scale: +$("#selScale").value, paused: state.paused, codec: canH264() ? "h264" : "jpeg" });
+  }
+  // --- WebCodecs H.264 decoding (secure context only: https or localhost) ---
+  let vdec = null, gotKey = false;
+  function ensureDecoder() {
+    if (vdec && vdec.state !== "closed") return vdec;
+    gotKey = false;
+    vdec = new VideoDecoder({
+      output: (f) => {
+        if (canvas.width !== f.displayWidth || canvas.height !== f.displayHeight) { canvas.width = f.displayWidth; canvas.height = f.displayHeight; }
+        state.frameW = f.displayWidth; state.frameH = f.displayHeight;
+        ctx.drawImage(f, 0, 0); f.close();
+        $("#overlayMsg").classList.add("hidden");
+      },
+      error: (e) => { console.warn("VideoDecoder error, falling back to JPEG", e); state.noH264 = true; try { vdec.close(); } catch (_) {} vdec = null; sendSettings(); },
+    });
+    vdec.configure({ codec: "avc1.64002A", optimizeForLatency: true });
+    return vdec;
+  }
+  function onH264(header, bytes) {
+    const d = ensureDecoder();
+    if (!gotKey && !header.key) return;
+    gotKey = true;
+    try { d.decode(new EncodedVideoChunk({ type: header.key ? "key" : "delta", timestamp: performance.now() * 1000, data: bytes })); }
+    catch (e) { console.warn(e); state.noH264 = true; sendSettings(); }
+    if (header.cx !== undefined) placeCursor(header.cx, header.cy);
   }
   function onJson(m) {
     switch (m.t) {
@@ -131,6 +160,7 @@
         else toast("對方剪貼簿是空的（或沒有文字）");
         break;
       case "toast": toast(m.text); break;
+      case "codec": state.codecName = m.codec; if (m.codec === "jpeg") { if (vdec) { try { vdec.close(); } catch (_) {} vdec = null; } } else { gotKey = false; } break;
     }
   }
   let drawChain = Promise.resolve();
@@ -138,6 +168,7 @@
     state.bytes += buf.byteLength; state.frames++;
     const view = new DataView(buf); const hl = view.getUint32(0);
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
+    if (header.t === "h264") { onH264(header, new Uint8Array(buf, 4 + hl)); return; }
     const blob = new Blob([new Uint8Array(buf, 4 + hl)], { type: "image/jpeg" });
     const p = createImageBitmap(blob);
     drawChain = drawChain.then(async () => {
@@ -160,7 +191,7 @@
   setInterval(() => {
     send({ t: "ping", ts: Date.now() });
     const kb = state.bytes / 1024; state.bytes = 0; const f = state.frames; state.frames = 0;
-    $("#stats").textContent = `${f} fps · ${kb.toFixed(0)} KB/s · ${state.latency} ms · ${state.frameW}×${state.frameH}`;
+    $("#stats").textContent = `${f} fps · ${kb.toFixed(0)} KB/s · ${state.latency} ms · ${state.frameW}×${state.frameH} · ${state.codecName || ""}`;
   }, 1000);
 
   // ---------------------------------------------------------------- input
@@ -385,7 +416,8 @@
   $("#optViewOnly").onchange = (e) => { state.opts.viewOnly = e.target.checked; state.viewOnly = e.target.checked; saveOpts(); stage.classList.toggle("viewOnly", state.viewOnly); if (state.viewOnly) send({ t: "release_all" }); };
   function renderConn() {
     const i = state.info || {};
-    const rows = [["對方名稱", i.name], ["對方系統", i.os], ["版本", i.version], ["擷取方式", i.capture], ["控制方式", i.control], ["網址", location.href]];
+    const rows = [["對方名稱", i.name], ["對方系統", i.os], ["版本", i.version], ["擷取方式", i.capture], ["控制方式", i.control],
+      ["影像格式", (state.codecName || "jpeg") + (canH264() ? "" : i.h264 ? "（瀏覽器需 https 或原生視窗才能用 H.264）" : "（對方未安裝 H.264 編碼器）")], ["網址", location.href]];
     $("#connTable").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${String(v ?? "").replace(/</g, "&lt;")}</td></tr>`).join("");
   }
 
