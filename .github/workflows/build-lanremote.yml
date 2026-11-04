@@ -1,0 +1,70 @@
+name: Build LAN Remote
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["lan-remote/**", ".github/workflows/build-lanremote.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: LanRemote-Windows
+          - os: macos-latest
+            artifact: LanRemote-macOS-AppleSilicon
+          - os: macos-13
+            artifact: LanRemote-macOS-Intel
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: lan-remote
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+      - name: Build
+        run: python build_exe.py
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          ditto -c -k --keepParent LanRemote.app LanRemote-mac.zip
+          ls -la
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: lan-remote/dist/LanRemote.exe
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: lan-remote/dist/LanRemote-mac.zip
+      - name: Rename for release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then mv LanRemote.exe ${{ matrix.artifact }}.exe; else mv LanRemote-mac.zip ${{ matrix.artifact }}.zip; fi
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            lan-remote/dist/${{ matrix.artifact }}.exe
+            lan-remote/dist/${{ matrix.artifact }}.zip

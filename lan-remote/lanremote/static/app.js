@@ -72,6 +72,14 @@
     $("#btnLogin").disabled = false; $("#btnLogin").textContent = "連線";
   }
   $("#btnLogin").onclick = login;
+  const manualConnect = () => {
+    let t = $("#manualAddr").value.trim(); if (!t) return;
+    if (!t.includes("://")) t = "http://" + t;
+    if ((t.match(/:/g) || []).length < 2) t = t.replace(/\/$/, "") + ":" + (location.port || 7788);
+    window.open(t.replace(/\/$/, "") + "/", "_blank");
+  };
+  $("#btnManual").onclick = manualConnect;
+  $("#manualAddr").addEventListener("keydown", (e) => { if (e.key === "Enter") manualConnect(); });
   $("#pin").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
 
   // ---------------------------------------------------------------- app / websocket

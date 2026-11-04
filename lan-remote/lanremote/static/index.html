@@ -17,9 +17,13 @@
     <label>PIN 碼<input id="pin" type="password" inputmode="numeric" placeholder="主機端視窗顯示的 PIN" autocomplete="off"></label>
     <button id="btnLogin" class="primary">連線</button>
     <p id="loginError" class="error"></p>
-    <details>
-      <summary>區網上的其他電腦</summary>
+    <details open>
+      <summary>連線到其他電腦</summary>
       <ul id="loginPeers" class="peerlist"><li class="muted">搜尋中…</li></ul>
+      <div class="row">
+        <input id="manualAddr" placeholder="或輸入對方 IP，例如 192.168.1.23">
+        <button id="btnManual">連線</button>
+      </div>
     </details>
   </div>
 </div>

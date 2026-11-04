@@ -61,7 +61,7 @@ def run(server, loop: asyncio.AbstractEventLoop):
 
     # ---- layout ----------------------------------------------------------
     pad = {"padx": 10, "pady": 4}
-    top = ttk.LabelFrame(root, text="這台電腦")
+    top = ttk.LabelFrame(root, text="這台電腦（被控端）— 把網址和 PIN 給對方")
     top.pack(fill="x", **pad)
 
     ttk.Label(top, text="名稱:").grid(row=0, column=0, sticky="w", padx=6, pady=3)
@@ -145,10 +145,11 @@ def run(server, loop: asyncio.AbstractEventLoop):
     viewers_lb.pack(fill="both", expand=True, padx=4, pady=4)
     ttk.Button(vf, text="全部斷線", command=server.kick_all).pack(pady=(0, 4))
 
-    pf = ttk.LabelFrame(mid, text="區網上的其他電腦（點兩下連線）")
+    pf = ttk.LabelFrame(mid, text="連線到其他電腦（控制別台）")
     pf.pack(side="left", fill="both", expand=True, padx=(4, 0))
-    peers_lb = tk.Listbox(pf, height=5)
-    peers_lb.pack(fill="both", expand=True, padx=4, pady=4)
+    ttk.Label(pf, text="區網上找到的電腦（點兩下連線）:", foreground="#555").pack(anchor="w", padx=4)
+    peers_lb = tk.Listbox(pf, height=4)
+    peers_lb.pack(fill="both", expand=True, padx=4, pady=2)
     peer_urls: list[str] = []
 
     def open_peer(_=None):
@@ -157,7 +158,26 @@ def run(server, loop: asyncio.AbstractEventLoop):
             webbrowser.open(peer_urls[sel[0]])
 
     peers_lb.bind("<Double-Button-1>", open_peer)
-    ttk.Button(pf, text="用瀏覽器連線", command=open_peer).pack(pady=(0, 4))
+    ttk.Button(pf, text="連線選取的電腦", command=open_peer).pack(pady=(0, 4))
+    ttk.Label(pf, text="或輸入對方 IP / 網址:", foreground="#555").pack(anchor="w", padx=4)
+    manual_row = ttk.Frame(pf)
+    manual_row.pack(fill="x", padx=4, pady=(0, 4))
+    manual_var = tk.StringVar()
+    manual_entry = ttk.Entry(manual_row, textvariable=manual_var)
+    manual_entry.pack(side="left", fill="x", expand=True)
+
+    def open_manual(_=None):
+        target = manual_var.get().strip()
+        if not target:
+            return
+        if "://" not in target:
+            target = "http://" + target
+        if target.count(":") < 2:  # no port given
+            target = target.rstrip("/") + f":{server.port}"
+        webbrowser.open(target.rstrip("/") + "/")
+
+    manual_entry.bind("<Return>", open_manual)
+    ttk.Button(manual_row, text="連線", command=open_manual, width=5).pack(side="left", padx=(4, 0))
 
     # ---- chat / log ------------------------------------------------------
     lf = ttk.LabelFrame(root, text="訊息 / 紀錄")
