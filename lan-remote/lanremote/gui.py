@@ -19,6 +19,13 @@ def show_error(msg: str):
     root.destroy()
 
 
+def show_info(msg: str):
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showinfo("LAN Remote", msg)
+    root.destroy()
+
+
 def run(server, loop: asyncio.AbstractEventLoop):
     root = tk.Tk()
     root.title(f"LAN Remote v{__version__}")
@@ -143,6 +150,8 @@ def run(server, loop: asyncio.AbstractEventLoop):
     ttk.Checkbutton(opts, text="用 HTTPS（瀏覽器端才能用 H.264 流暢模式，需重啟）", variable=https_var, command=https_changed).pack(anchor="w", padx=8)
     if server.demo:
         ttk.Label(opts, text="⚠ 示範模式：畫面為模擬、不會真的控制這台電腦", foreground="#b00").pack(anchor="w", padx=8, pady=2)
+    if server.settings.get("port_fallback"):
+        ttk.Label(opts, text=f"⚠ 預設埠被其他程式佔用，這次改用 {server.port}（對方仍可自動找到）", foreground="#b60").pack(anchor="w", padx=8, pady=2)
 
     # ---- viewers & peers -------------------------------------------------
     mid = ttk.Frame(root)

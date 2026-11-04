@@ -153,7 +153,7 @@ lan-remote/
 - **Ctrl+Alt+Del**：Windows 不允許軟體模擬，請改用「Ctrl+Shift+Esc」開工作管理員，或 Win+L 鎖定。
 - **瀏覽器快捷鍵被吃掉**（Ctrl+W、Cmd+Q…）：按「全螢幕」後 Chrome / Edge 會把大部分按鍵交給網頁；其餘請用「按鍵」選單。
 - **Linux 被控端**：目前支援 X11，Wayland 下 mss / pynput 無法擷取與控制。
-- **埠號衝突**：`--port 8000` 換一個。
+- **「port 7788 已被使用」**：通常是前一個 LAN Remote 還在執行（Mac 看 Dock、Windows 看工作列右下角）。新版啟動時會偵測：若是 LAN Remote 自己在跑會提示並結束；若是別的程式佔用會自動改用下一個空埠（視窗會顯示實際埠號，對方仍能自動找到）。也可用 `--port 8000` 指定。
 
 ## 延伸功能構想（尚未實作，可依需求加）
 

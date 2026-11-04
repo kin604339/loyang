@@ -8,9 +8,11 @@ import logging
 import os
 import platform
 import secrets
+import socket
 import subprocess
 import sys
 import threading
+import urllib.request
 
 from . import __version__
 from .server import RemoteServer
@@ -46,8 +48,12 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    data = dict(cfg)
+    if data.pop("port_fallback", None):
+        data["port"] = cfg.get("port_original", data["port"])
+    data.pop("port_original", None)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def new_pin() -> str:
@@ -178,6 +184,58 @@ def run_with_gui(server: RemoteServer):
         t.join(5)
 
 
+def _port_free(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", port))
+        return True
+    except OSError:
+        return False
+
+
+def _running_lanremote(port: int) -> dict | None:
+    """If another LAN Remote already listens on this port, return its /api/info."""
+    import ssl
+
+    for scheme in ("http", "https"):
+        try:
+            ctx = ssl._create_unverified_context() if scheme == "https" else None
+            with urllib.request.urlopen(f"{scheme}://127.0.0.1:{port}/api/info", timeout=1.5, context=ctx) as r:
+                info = json.loads(r.read().decode())
+                if "pin" not in info and "version" in info and "ips" in info:
+                    return info
+        except Exception:
+            continue
+    return None
+
+
+def resolve_port(cfg: dict, show_message=None) -> bool:
+    """Make sure cfg['port'] is usable. Returns False if LAN Remote is already running."""
+    port = int(cfg.get("port", 7788))
+    if _port_free(port):
+        return True
+    info = _running_lanremote(port)
+    if info:
+        msg = (f"LAN Remote 已經在執行中（名稱 {info.get('name')}，埠 {port}）。\n"
+               "請找到它的視窗（Mac 看 Dock / Windows 看工作列），不需要再開一個。\n"
+               "若要重新啟動，請先把原本那個關掉。")
+        print(msg)
+        if show_message:
+            show_message(msg)
+        return False
+    for cand in range(port + 1, port + 30):
+        if cand == 7789:
+            continue
+        if _port_free(cand):
+            print(f"埠 {port} 被其他程式佔用，改用 {cand}")
+            cfg["port_original"] = port
+            cfg["port"] = cand
+            cfg["port_fallback"] = True
+            return True
+    return True
+
+
 def launch_viewer(url: str, pin: str = "", name: str = "") -> subprocess.Popen:
     """Open the native viewer window in a separate process (works both from source and from the packaged exe)."""
     env = dict(os.environ)
@@ -206,15 +264,28 @@ def main(argv=None):
     else:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = build_settings(args)
+    want_gui = not (args.no_gui or os.environ.get("LANREMOTE_NO_GUI"))
+
+    def show_message(msg):
+        if want_gui:
+            try:
+                from . import gui
+
+                gui.show_info(msg)
+            except Exception:
+                pass
+
+    if not resolve_port(settings, show_message):
+        return
     if settings.get("encoder"):
         from . import video
 
         video.set_preferred(settings["encoder"])
     server = RemoteServer(settings, demo=args.demo)
-    if args.no_gui or os.environ.get("LANREMOTE_NO_GUI"):
-        run_headless(server)
-    else:
+    if want_gui:
         run_with_gui(server)
+    else:
+        run_headless(server)
 
 
 if __name__ == "__main__":
